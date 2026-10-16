@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -72,18 +73,25 @@ func signupHandler(db *sql.DB) func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
+		if user.Email == "" || user.Password == "" {
+			http.Error(w, "email and password required", 400)
+			return
+		}
+
 		password_hash, err := bcrypt.GenerateFromPassword([]byte(user.Password), 12)
 		if err != nil {
 			http.Error(w, "Internal error", 500)
+			return
 		}
 
 		_, err = db.Exec(
-			`INSERT INTO users(email, password_hash) VALUES ($1, $2)`, 
-			user.Email, 
+			`INSERT INTO users(email, password_hash) VALUES ($1, $2)`,
+			user.Email,
 			password_hash)
-		
+
 		if err != nil {
-			http.Error(w, "Internal error", 500)
+			http.Error(w, "Internal error", 400)
+			return
 		}
 
 		w.WriteHeader(201)
@@ -91,13 +99,12 @@ func signupHandler(db *sql.DB) func(http.ResponseWriter, *http.Request) {
 	}
 }
 
-
 func loginHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request){
+	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 
-		var user User 
+		var user User
 		if err := decoder.Decode(&user); err != nil {
 			http.Error(w, "invalid request", 400)
 			return
@@ -112,7 +119,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 		var user_id int
 		err := row.Scan(&user_id, &actual_password_hash)
 
-		if errors.Is(err, sql.ErrNoRows){
+		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "No such user exists", 404)
 			return
 		}
@@ -134,25 +141,63 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 			"INSERT INTO sessions(id, user_id, expires_at) VALUES ($1, $2, $3)",
 			uuid,
 			user_id,
-			time.Now().Add(10 * 24 * time.Hour),
-		); err != nil { 
+			time.Now().Add(10*24*time.Hour),
+		); err != nil {
 			http.Error(w, "internal error", 500)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		json.NewEncoder(w).Encode(map[string]string{
-			"session-id": uuid.String(),
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session_id",
+			Value:    uuid.String(),
+			Expires:  time.Now().Add(10 * 24 * time.Hour),
+			HttpOnly: true,
+			Path:     "/",
 		})
-		
+		w.WriteHeader(200)
+
 	}
 }
 
 
 
+func authMiddleware(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
+	const user_id_key string = "user_id"
 
+	return func(w http.ResponseWriter, r *http.Request){
+		cookie, err := r.Cookie("session_id")
+		if err != nil {
+			http.Error(w, "Unauthenticated user", 401)
+		}
 
+		var user_id int
+		var expires_at time.Time
 
+		err = db.QueryRow(
+			"SELECT user_id, expires_at FROM sessions WHERE id = $1",
+			cookie.Value,
+		).Scan(&user_id, &expires_at)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows){
+				http.Error(w, "No such user exists", 401)
+				return
+			}
+			http.Error(w, "Internal error", 500)
+			return
+		}
+
+		if time.Now().After(expires_at) {
+			http.Error(w, "session expired", 401)
+			return 
+		}
+
+		ctx := context.WithValue(r.Context(), user_id_key, user_id)
+		r = r.WithContext(ctx)
+
+		next(w, r)
+	}
+}
 
 
