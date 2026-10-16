@@ -55,8 +55,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/signup", signupHandler(db))
-	mux.HandleFunc("/login", loginHandler(db))
+	mux.HandleFunc("POST /signup", signupHandler(db))
+	mux.HandleFunc("POST /login", loginHandler(db))
+	mux.HandleFunc("GET /protected", authMiddleware(db, protectedHandler))
 
 	fmt.Println("> Server on port 8080")
 	http.ListenAndServe(":8080", mux)
@@ -80,16 +81,18 @@ func signupHandler(db *sql.DB) func(http.ResponseWriter, *http.Request) {
 
 		password_hash, err := bcrypt.GenerateFromPassword([]byte(user.Password), 12)
 		if err != nil {
+			fmt.Println(err.Error())
 			http.Error(w, "Internal error", 500)
 			return
 		}
-
+		
 		_, err = db.Exec(
-			`INSERT INTO users(email, password_hash) VALUES ($1, $2)`,
+			`INSERT INTO users(email, password_hash) VALUES ($1, $2) ON CONFLICT (email) DO NOTHING;`,
 			user.Email,
 			password_hash)
-
-		if err != nil {
+			
+			if err != nil {
+			fmt.Println(err.Error())
 			http.Error(w, "Internal error", 400)
 			return
 		}
@@ -169,6 +172,7 @@ func authMiddleware(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 		cookie, err := r.Cookie("session_id")
 		if err != nil {
 			http.Error(w, "Unauthenticated user", 401)
+			return
 		}
 
 		var user_id int
@@ -198,6 +202,22 @@ func authMiddleware(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+
+
+func protectedHandler(w http.ResponseWriter, r *http.Request){
+	user_id, ok := r.Context().Value("user_id").(int)
+	if !ok {
+		http.Error(w, "No user", 401)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	json.NewEncoder(w).Encode(map[string]int{
+		"user_id": user_id,
+	})
 }
 
 
